@@ -19,7 +19,7 @@ if success then
 else
     local player = game.Players.LocalPlayer
     if player then
-        player:Kick("Script won't work on Solara and Xeno")
+        player:Kick("AC bypass failed")
     end
 end
 
@@ -167,35 +167,6 @@ local function Notify(title, content, ntype, dur)
     end)
 end
 
-local KNS = {
-    Enabled = false,
-    Name    = "xX_Player_Xx",
-    _origDN = nil,
-}
-
-local function KNS_Apply(char)
-    char = char or LP.Character
-    if not char then return end
-    pcall(function()
-        local hum   = char:FindFirstChildOfClass("Humanoid")
-        if not hum then return end
-        KNS._origDN = hum.DisplayName
-        hum.DisplayName = KNS.Name
-    end)
-end
-
-local function KNS_Revert()
-    local char = LP.Character
-    if not char then return end
-    pcall(function()
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum and KNS._origDN then hum.DisplayName = KNS._origDN end
-    end)
-end
-
-LP.CharacterAdded:Connect(function(char)
-    if KNS.Enabled then task.delay(0.3, KNS_Apply, char) end
-end)
 
 
 local ESP = {
@@ -718,7 +689,6 @@ end
 
 local AutoMine = {
     Enabled=false, Range=40, MineBasalt=true, IgnoreFloor=true,
-    MapScanRunning=false,
 }
 local _autoMineDH = nil
 local function _autoMineGetMine()
@@ -2117,131 +2087,6 @@ task.spawn(function()
     end
 end)
 
-local function AutoMine_StartMapScan()
-    if AutoMine.MapScanRunning then return end
-    AutoMine.MapScanRunning = true
-    Notify("Map Mine Scan", "Starting...", "Info")
-    task.spawn(function()
-        local mineEv = _autoMineGetMine()
-        if not mineEv then
-            AutoMine.MapScanRunning = false
-            return Notify("Map Mine Scan", "Mine event not found", "Error")
-        end
-        local char = LP.Character
-        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-        local tool = char and char:FindFirstChildOfClass("Tool")
-        if not hrp or not tool then
-            AutoMine.MapScanRunning = false
-            return Notify("Map Mine Scan", "Hold a pickaxe first", "Warning")
-        end
-        local wv = tool:FindFirstChild("weapon")
-        if not wv or (wv.Value ~= "pick" and wv.Value ~= "pickaxe") then
-            AutoMine.MapScanRunning = false
-            return Notify("Map Mine Scan", "Hold a pickaxe first", "Warning")
-        end
-
-        local MINE_MATS = {
-            [Enum.Material.Rock]      = true,
-            [Enum.Material.Mud]       = true,
-            [Enum.Material.Slate]     = true,
-            [Enum.Material.Limestone] = true,
-            [Enum.Material.Sandstone] = true,
-            [Enum.Material.Basalt]    = true,
-        }
-
-        -- same sphere of directions as the regular auto mine
-        local SCAN_DIRS = {}
-        for i = 0, 7 do
-            local yaw = (i / 8) * math.pi * 2
-            for j = -3, 3 do
-                local pitch = (j / 4) * (math.pi * 0.45)
-                local cy, sy = math.cos(yaw), math.sin(yaw)
-                local cp, sp = math.cos(pitch), math.sin(pitch)
-                table.insert(SCAN_DIRS, Vector3.new(cy*cp, sp, sy*cp))
-            end
-        end
-        table.insert(SCAN_DIRS, Vector3.new(0,-1,0))
-        table.insert(SCAN_DIRS, Vector3.new(0, 1,0))
-
-        -- exclude character, same as regular auto mine
-        local rpMine = RaycastParams.new()
-        rpMine.FilterType = Enum.RaycastFilterType.Exclude
-        rpMine.FilterDescendantsInstances = {char}
-
-        -- include only terrain for surface detection
-        local rpSurf = RaycastParams.new()
-        rpSurf.FilterType = Enum.RaycastFilterType.Include
-        rpSurf.FilterDescendantsInstances = {workspace.Terrain}
-
-        -- STEP=60, RANGE=45: diagonal worst-case 60*0.707=42 studs, within RANGE
-        local STEP   = 60
-        local RANGE  = 45
-        -- offsets from detected terrain surface: entrance, mid, deep
-        local Y_OFFS = {2, -45, -95}
-
-        local startPos = hrp.Position
-        local xMin = startPos.X - 750
-        local xMax = startPos.X + 750
-        local zMin = startPos.Z - 750
-        local zMax = startPos.Z + 750
-
-        local origCF    = hrp.CFrame
-        local mined     = 0
-        local stepsDone = 0
-        local total     = math.ceil((xMax-xMin)/STEP) * math.ceil((zMax-zMin)/STEP)
-
-        local x = xMin
-        while x <= xMax and AutoMine.MapScanRunning do
-            local z = zMin
-            while z <= zMax and AutoMine.MapScanRunning do
-
-                -- find actual terrain surface at this XZ column
-                local surfRay = workspace:Raycast(Vector3.new(x, 500, z), Vector3.new(0,-1000,0), rpSurf)
-                local surfY   = surfRay and surfRay.Position.Y or startPos.Y
-
-                for _, yOff in ipairs(Y_OFFS) do
-                    if not AutoMine.MapScanRunning then break end
-                    char = LP.Character
-                    if not char then AutoMine.MapScanRunning = false; break end
-                    hrp  = char:FindFirstChild("HumanoidRootPart")
-                    tool = char:FindFirstChildOfClass("Tool")
-                    if not hrp or not tool then AutoMine.MapScanRunning = false; break end
-
-                    rpMine.FilterDescendantsInstances = {char}
-
-                    local yLv = surfY + yOff
-                    hrp.CFrame = CFrame.new(x, yLv, z)
-                    -- 0.15s gives server time to replicate our new position
-                    task.wait(0.15)
-
-                    local origin = Vector3.new(x, yLv, z)
-                    for _, dir in ipairs(SCAN_DIRS) do
-                        local res = workspace:Raycast(origin, dir * RANGE, rpMine)
-                        if res and res.Instance == workspace.Terrain and MINE_MATS[res.Material] then
-                            pcall(function()
-                                mineEv:Fire(CFrame.new(res.Position, origin), tool, false, workspace.Terrain)
-                            end)
-                            mined = mined + 1
-                        end
-                    end
-                end
-
-                stepsDone = stepsDone + 1
-                if stepsDone % 15 == 0 then
-                    Notify("Map Mine Scan", math.floor(stepsDone/total*100).."%  "..mined.." mined", "Info")
-                end
-                z = z + STEP
-            end
-            x = x + STEP
-        end
-
-        local completed = AutoMine.MapScanRunning
-        pcall(function() if hrp then hrp.CFrame = origCF end end)
-        AutoMine.MapScanRunning = false
-        Notify("Map Mine Scan", (completed and "Done! " or "Stopped. ")..mined.." events fired", completed and "Success" or "Warning")
-    end)
-end
-
 
 local SkyPresets={
     {name="Galaxy",id="159454299"},{name="Clouds",id="570557514"},{name="Dark",id="6285719338"},
@@ -2730,7 +2575,7 @@ WepModL:AddToggle({ Name="Incendiary Bullets", Default=false, Flag="wm_inc",
         if not _configLoading then WM_PatchAll(); Notify("Weapons", v and "Incendiary ON" or "Incendiary OFF", v and "Success" or "Warning") end
     end })
 
-WepModR:AddButton({ Name="To Apply Weapon Mods you must reset", Callback=function() end })
+WepModR:AddInfobox({ Title="Note", Text="You must reset your character to apply weapon mods.", Type="Warning" })
 
 local KillAuraSec = RageTab:AddSection({ Name="Kill Aura", Side="Left", Group="Kill Aura" })
 local KillAuraInfo = RageTab:AddSection({ Name="Info", Side="Right", Group="Kill Aura" })
@@ -2762,7 +2607,7 @@ KillAuraSec:AddKeybind({ Name="Kill Aura Keybind", Default=Enum.KeyCode.K, Flag=
         end
     end })
 
-KillAuraInfo:AddButton({ Name="You must hold out a weapon.", Callback=function() end })
+KillAuraInfo:AddInfobox({ Title="Note", Text="You must hold out a weapon.", Type="Warning" })
 
 end
 
@@ -2996,16 +2841,7 @@ MiscMineL:AddKeybind({ Name="Auto Mine Keybind", Default=Enum.KeyCode.M, Flag="a
         end
     end })
 
-MiscMineR:AddButton({ Name="You must hold a pick or pickaxe.", Callback=function() end })
-MiscMineR:AddButton({ Name="Scan & Mine Full Map", Icon=Hyperion.Lucide.Map,
-    Callback=function() AutoMine_StartMapScan() end })
-MiscMineR:AddButton({ Name="Stop Map Scan", Icon=Hyperion.Lucide.X,
-    Callback=function()
-        if AutoMine.MapScanRunning then
-            AutoMine.MapScanRunning = false
-            Notify("Map Mine Scan", "Stopping...", "Warning")
-        end
-    end })
+MiscMineR:AddInfobox({ Title="Note", Text="You must be holding a pick or pickaxe for auto mine to work.", Type="Info" })
 
 MiscMoveL:AddToggle({ Name="Fly",    Default=false, Flag="fly_on",
     Callback=function(v) Move.Fly=v; if not _configLoading then if v then EnableFly() else DisableFly() end; Notify("Fly",v and "ON" or "OFF","Info") end end })
@@ -3077,39 +2913,6 @@ MiscTracersL:AddSlider({ Name="Impact Size", Min=1, Max=20, Default=5,  Decimals
 MiscTracersL:AddColorPicker({ Name="Color",      Default=Color3.fromRGB(140,80,255), Flag="bt_col",  Callback=function(c) BulletTracers.Color=c end })
 MiscTracersL:AddColorPicker({ Name="Glow Color", Default=Color3.fromRGB(80,40,220),  Flag="bt_gcol", Callback=function(c) BulletTracers.GlowColor=c end })
 
-local KNSLeft  = MiscTab:AddSection({ Name="Display Name Spoofer", Side="Left",  Group="Display Name Spoofer" })
-local KNSRight = MiscTab:AddSection({ Name="Actions",             Side="Right", Group="Display Name Spoofer" })
-
-local _knsToggle = KNSLeft:AddToggle({ Name="Enable Spoofer", Default=false, Flag="kns_on",
-    Callback=function(v)
-        KNS.Enabled = v
-        if v then KNS_Apply() else KNS_Revert() end
-        if not _configLoading then Notify("Display Name Spoofer", v and "ON" or "OFF", v and "Success" or "Warning") end
-    end })
-
-KNSLeft:AddKeybind({ Name="Toggle Keybind", Default=Enum.KeyCode.Unknown, Flag="kns_kb",
-    Callback=function()
-        KNS.Enabled = not KNS.Enabled
-        local ok = pcall(function() _knsToggle:Set(KNS.Enabled) end)
-        if not ok then
-            if KNS.Enabled then KNS_Apply() else KNS_Revert() end
-            Notify("Display Name Spoofer", KNS.Enabled and "ON" or "OFF", KNS.Enabled and "Success" or "Warning")
-        end
-    end })
-
-KNSLeft:AddButton({ Name="Changes overhead tag only — not kill log", Callback=function() end })
-
-KNSRight:AddButton({ Name="Re-apply Name", Icon=Hyperion.Lucide.RefreshCw,
-    Callback=function()
-        if KNS.Enabled then KNS_Apply()
-            Notify("Display Name Spoofer", "Re-applied: "..KNS.Name, "Success")
-        end
-    end })
-KNSRight:AddButton({ Name="Revert Real Name", Icon=Hyperion.Lucide.RotateCcw,
-    Callback=function()
-        KNS_Revert()
-        Notify("Display Name Spoofer", "Reverted to real name", "Info")
-    end })
 
 
 end
