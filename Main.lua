@@ -2924,10 +2924,18 @@ local ThemeSec    = SettingsTab:AddSection({ Name="Themes", Side="Left",  Group=
 local SystemSec   = SettingsTab:AddSection({ Name="System", Side="Right", Group="Appearance" })
 
 ThemeSec:AddDropdown({ Name="Color Theme",
-    Values={"Purple","Midnight","Rose","Crimson","Sunset","Sakura","StarryNight","Aurora","Nebula","Ocean"},
+    Values={"Purple","Midnight","Rose","Crimson","Sunset","Sakura","StarryNight","Aurora","Nebula","Ocean","Christmas","Neko"},
     Default="Purple", Flag="theme_sel",
     Callback=function(v)
         pcall(function() Hyperion:SetTheme(v) end)
+        pcall(function()
+            local th = Hyperion.Themes[v]
+            if th and th.BackgroundImage and th.BackgroundImage ~= "" then
+                Window:SetBackground(th.BackgroundImage, th.BackgroundTint or 0.45)
+            else
+                Window:SetBackground(nil)
+            end
+        end)
         Notify("Theme","Applied: "..v,"Success")
     end })
 
