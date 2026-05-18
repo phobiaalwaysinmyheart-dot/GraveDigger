@@ -1,31 +1,39 @@
 
-local success, err = pcall(function()
-    do
-        for _, v in pairs(getgc()) do
-            if type(v) == "function" then
-                local name = debug.info(v, "n")
-                if name == "b" then
-                    hookfunction(v, function()
-                        return coroutine.yield()
-                    end)
+if not _G._gdBypassDone then
+    _G._gdBypassDone = true
+    local success, err = pcall(function()
+        do
+            for _, v in pairs(getgc()) do
+                if type(v) == "function" then
+                    local name = debug.info(v, "n")
+                    if name == "b" then
+                        hookfunction(v, function()
+                            return coroutine.yield()
+                        end)
+                    end
                 end
             end
         end
-    end
-end)
+    end)
 
-if success then
-    print("[Hyperion] AC bypass successful")
-else
-    local player = game.Players.LocalPlayer
-    if player then
-        player:Kick("AC bypass failed")
+    if success then
+        print("[Hyperion] AC bypass successful")
+    else
+        local player = game.Players.LocalPlayer
+        if player then
+            player:Kick("AC bypass failed")
+        end
     end
 end
 
-local Hyperion = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/phobiaalwaysinmyheart-dot/HBui/refs/heads/main/HyperionUI.lua"
-))()
+local _hyperionSrc
+local _ok, _err = pcall(function()
+    _hyperionSrc = game:HttpGet("https://raw.githubusercontent.com/phobiaalwaysinmyheart-dot/HBui/refs/heads/main/HyperionUI.lua")
+end)
+if not _ok or not _hyperionSrc or _hyperionSrc == "" then
+    _hyperionSrc = game:HttpGet("https://cdn.jsdelivr.net/gh/phobiaalwaysinmyheart-dot/HBui@main/HyperionUI.lua")
+end
+local Hyperion = loadstring(_hyperionSrc)()
 
 do
     local _htKickMsg = "Hyperion integrity check failed."
@@ -255,13 +263,25 @@ local ESP = {
 
 
 local WeaponMods = {
-    NoSpread   = false,
-    NoRecoil   = false,
-    NoReload   = false,
-    InstantADS = false,
-    RapidFire  = false,
-    Incendiary = false,
-    RapidMult  = 1.5,
+    NoSpread      = false,
+    NoRecoil      = false,
+    NoReload      = false,
+    InstantADS    = false,
+    RapidFire     = false,
+    Incendiary    = false,
+    InfiniteAmmo  = false,
+    WallPierce    = false,
+    RapidMult     = 1.5,
+}
+
+local KSAutoReload = {
+    Enabled        = false,
+    Chambers       = 6,
+    SpentCaps      = false,
+    Keybind        = Enum.KeyCode.G,
+    InstantEnabled = false,
+    InstantKeybind = Enum.KeyCode.H,
+    _reloading     = false,
 }
 
 local Cam = workspace.CurrentCamera
@@ -595,18 +615,8 @@ local Aim = {
 Aim.TriggerKeyVal  = Enum.UserInputType.MouseButton2
 Aim.TriggerKeyType = "mouse"
 
-local Cross = {
-    Enabled=false, Style="Classic", Position=1, Size=12, GapSize=6,
-    Thickness=1, Color=Color3.fromRGB(255,255,255),
-    Outline=true, OutlineColor=Color3.fromRGB(255,255,255),
-    Rotate=false, RotationSpeed=5,
-    CenterDotEnabled=true, CenterDotRadius=2, CenterDotFilled=true,
-    CenterDotColor=Color3.fromRGB(255,255,255),
-    RainbowColor=false, TStyle=false, Dynamic=false,
-    InnerEnabled=false, InnerSize=4, InnerGap=2,
-}
-
-local Move = { Noclip=false, Fly=false, FlySpeed=50 }
+local Move = { Noclip=false, Fly=false, FlySpeed=50, WalkBase=16 }
+local InstantSprint = { Enabled=false, Keybind=Enum.KeyCode.P }
 
 local BulletTracers = {
     Enabled=false, Color=Color3.fromRGB(140,80,255),
@@ -617,7 +627,7 @@ local BulletTracers = {
 
 local Rage = {
     Enabled=false, FOV=150, VisibleCheck=true, TeamCheck=true,
-    Prediction=0.165, UpdateRate=0.1, AimPart="Head", HitChance=100,
+    Prediction=0.165, UpdateRate=0.1, AimPart="Head", HitPart="Auto", HitChance=100,
     BulletTP=false, TargetPriority="Distance", StickyAim=true,
     HighlightTarget=false, ShowTargetInfo=true, ShowTargetName=true,
     ShowTargetHP=true, ShowTargetDistance=true, ShowHitChance=true,
@@ -854,6 +864,107 @@ local function kitUpdateLoop()
     end
 end
 
+
+-- Trap ESP stored in _G to use zero outer-scope registers
+_G.TrapESP = (function()
+    local NAMES = {["Dynamite Stack"]=true,["Gas Shell"]=true,["Light Lure"]=true,
+                   ["Mantrap"]=true,["Shotshell Trap"]=true,["Tin Bomb"]=true}
+    local SCAN = 0.5
+    local tracked, lastScan = {}, 0
+    local cfg = {
+        Enabled=false, HighlightEnabled=true, LabelEnabled=true, DistEnabled=true,
+        TeamLabel=true, EnemyOnly=true, MaxDistance=5000,
+        FillColor=Color3.fromRGB(255,60,60), OutlineColor=Color3.fromRGB(255,255,255),
+        FillTransparency=0.3,
+    }
+    local function ppos()
+        local c=LP.Character; if c then local h=c:FindFirstChild("HumanoidRootPart"); if h then return h.Position end end
+        return Vector3.new(0,0,0)
+    end
+    local function getRoot(m)
+        local c = m:FindFirstChild("construction")
+        if c then
+            if c:IsA("BasePart") then return c end
+            local p = c:FindFirstChildWhichIsA("BasePart", true)
+            if p then return p end
+        end
+        return m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true)
+    end
+    local function getDist(m) local r=getRoot(m); if not r then return math.huge end local ok,d=pcall(function() return (ppos()-r.Position).Magnitude end); return ok and d or math.huge end
+    local function getTeam(m)
+        local t=m:FindFirstChild("team")
+        if t and t.Value then return t.Value.Name end
+        return "?"
+    end
+    local function make(m)
+        local hl=Instance.new("Highlight")
+        hl.FillColor=cfg.FillColor; hl.OutlineColor=cfg.OutlineColor
+        hl.FillTransparency=cfg.FillTransparency; hl.OutlineTransparency=0
+        hl.Enabled=cfg.HighlightEnabled
+        hl.Adornee=m
+        hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent=workspace
+        local r=getRoot(m); if not r then return end
+        local bb=Instance.new("BillboardGui")
+        bb.Adornee=r; bb.AlwaysOnTop=true; bb.Size=UDim2.new(0,160,0,54)
+        bb.StudsOffset=Vector3.new(0,4,0); bb.Enabled=true; bb.Parent=m
+        local nl=Instance.new("TextLabel")
+        nl.Size=UDim2.new(1,0,0.4,0); nl.BackgroundTransparency=1; nl.Text=m.Name
+        nl.TextColor3=cfg.FillColor; nl.TextStrokeColor3=Color3.new(0,0,0); nl.TextStrokeTransparency=0
+        nl.TextScaled=true; nl.Visible=cfg.LabelEnabled; nl.Font=Enum.Font.GothamBold; nl.Parent=bb
+        local tl=Instance.new("TextLabel")
+        tl.Size=UDim2.new(1,0,0.3,0); tl.Position=UDim2.new(0,0,0.4,0); tl.BackgroundTransparency=1
+        local teamName=getTeam(m)
+        local teamColor = teamName=="Royal Nation" and Color3.fromRGB(180,100,255) or Color3.fromRGB(255,200,50)
+        tl.TextColor3=teamColor; tl.TextStrokeColor3=Color3.new(0,0,0); tl.TextStrokeTransparency=0
+        tl.TextScaled=true; tl.Font=Enum.Font.Gotham; tl.Text=teamName; tl.Visible=cfg.TeamLabel; tl.Parent=bb
+        local dl=Instance.new("TextLabel")
+        dl.Size=UDim2.new(1,0,0.3,0); dl.Position=UDim2.new(0,0,0.7,0); dl.BackgroundTransparency=1
+        dl.TextColor3=Color3.fromRGB(255,255,255); dl.TextStrokeColor3=Color3.new(0,0,0); dl.TextStrokeTransparency=0
+        dl.TextScaled=true; dl.Font=Enum.Font.Gotham; dl.Visible=cfg.DistEnabled; dl.Parent=bb
+        tracked[m]={hl=hl,bb=bb,nl=nl,tl=tl,dl=dl}
+    end
+    local function drop(m)
+        local e=tracked[m]; if not e then return end
+        pcall(function() e.hl:Destroy() end)
+        pcall(function() e.bb:Destroy() end)
+        tracked[m]=nil
+    end
+    function cfg.removeAll() for m in pairs(tracked) do drop(m) end end
+    local function scan()
+        local folder=workspace:FindFirstChild("constructions"); local cur={}
+        if folder and cfg.Enabled then
+            for _,obj in ipairs(folder:GetChildren()) do
+                local isTrap = obj:IsA("Model") and NAMES[obj.Name]
+                local teamObj = isTrap and obj:FindFirstChild("team")
+                local isEnemy = not cfg.EnemyOnly or (teamObj and teamObj.Value and teamObj.Value ~= LP.Team)
+                if isTrap and isEnemy then
+                    local d=getDist(obj)
+                    if d<=cfg.MaxDistance then cur[obj]=true; if not tracked[obj] then pcall(make,obj) end
+                    elseif tracked[obj] then drop(obj) end
+                end
+            end
+        end
+        for m in pairs(tracked) do if not cur[m] then drop(m) end end
+    end
+    function cfg.update()
+        local now=tick()
+        if now-lastScan>=SCAN then lastScan=now; pcall(scan) end
+        for m,e in pairs(tracked) do
+            if m and m.Parent then pcall(function()
+                local d=getDist(m); local vis=d<=cfg.MaxDistance and cfg.Enabled
+                e.bb.Enabled=vis; e.hl.Enabled=vis and cfg.HighlightEnabled
+                e.nl.Visible=cfg.LabelEnabled; e.nl.TextColor3=cfg.FillColor
+                e.tl.Visible=cfg.TeamLabel
+                e.hl.FillColor=cfg.FillColor; e.hl.OutlineColor=cfg.OutlineColor
+                e.hl.FillTransparency=cfg.FillTransparency
+                if cfg.DistEnabled then e.dl.Text=math.floor(d).."m"; e.dl.Visible=true
+                else e.dl.Visible=false end
+            end) end
+        end
+    end
+    return cfg
+end)()
 
 local AimTarget=nil; local AimLocking=false; local _aimStickyTimer=0
 local _triggerCooldown=false; local _springVelX,_springVelY=0,0
@@ -1097,67 +1208,6 @@ UIS.InputEnded:Connect(function(input)
 end)
 
 
-local CL={}
-for i=1,4 do
-    CL["O"..i]=NewLine(2); CL["O"..i].Thickness=3; CL["O"..i].Color=Color3.new(0,0,0)
-    CL["L"..i]=NewLine(3); CL["IL"..i]=NewLine(3)
-end
-CL.CDO=NewCircle(2); CL.CDO.Filled=true; CL.CDO.Color=Color3.new(0,0,0)
-CL.CD=NewCircle(3); CL.CD.Filled=true
-CL.Circle=NewCircle(3); CL.Circle.Filled=false
-CL.CircleO=NewCircle(2); CL.CircleO.Filled=false; CL.CircleO.Thickness=3
-local _crossWasEnabled=false
-
-local function UpdateCrosshair()
-    if not Cross.Enabled then
-        for _,d in pairs(CL) do pcall(function() d.Visible=false end) end
-        if _crossWasEnabled then pcall(function() UIS.MouseIconEnabled=true end); _crossWasEnabled=false end; return
-    end
-    if not _crossWasEnabled then pcall(function() UIS.MouseIconEnabled=false end); _crossWasEnabled=true end
-    local anchor=Cross.Position==1 and UIS:GetMouseLocation() or Camera.ViewportSize/2
-    local x,y=anchor.X,anchor.Y; local col=Cross.RainbowColor and Rainbow() or Cross.Color
-    local outCol=Cross.OutlineColor; local dynGap=Cross.GapSize
-    if Cross.Dynamic and LP_Char then
-        local hrp=LP_Char:FindFirstChild("HumanoidRootPart")
-        if hrp then local spd=hrp.AssemblyLinearVelocity.Magnitude; dynGap=Cross.GapSize+math.floor(math.min(spd*0.15,12)) end
-    end
-    local s=Cross.Size; local g=dynGap; local thk=Cross.Thickness
-    local rd=Cross.Rotate and math.rad(tick()*Cross.RotationSpeed) or 0
-    local cr,sr=math.cos(rd),math.sin(rd)
-    for i=1,4 do CL["L"..i].Visible=false; CL["O"..i].Visible=false; CL["IL"..i].Visible=false end
-    CL.CD.Visible=false; CL.CDO.Visible=false; CL.Circle.Visible=false; CL.CircleO.Visible=false
-    if Cross.Style=="Circle" then
-        if Cross.Outline then CL.CircleO.Position=anchor; CL.CircleO.Radius=s+thk; CL.CircleO.Color=outCol; CL.CircleO.Thickness=thk+2; CL.CircleO.Visible=true end
-        CL.Circle.Position=anchor; CL.Circle.Radius=s; CL.Circle.Color=col; CL.Circle.Thickness=thk; CL.Circle.Visible=true
-    elseif Cross.Style=="Dot" then
-        if Cross.Outline then CL.CDO.Position=anchor; CL.CDO.Radius=s/2+2; CL.CDO.Color=outCol; CL.CDO.Visible=true end
-        CL.CD.Position=anchor; CL.CD.Radius=s/2; CL.CD.Color=col; CL.CD.Visible=true
-    else
-        local rawDirs={{-1,0},{1,0},{0,-1},{0,1}}; local drawCount=Cross.TStyle and 3 or 4
-        for i=1,drawCount do
-            local dx,dy=rawDirs[i][1],rawDirs[i][2]; local rx=dx*cr-dy*sr; local ry=dx*sr+dy*cr
-            local fromX=x+rx*g; local fromY=y+ry*g; local toX=x+rx*(g+s); local toY=y+ry*(g+s)
-            if Cross.Outline then CL["O"..i].From=V2(fromX,fromY); CL["O"..i].To=V2(toX,toY); CL["O"..i].Color=outCol; CL["O"..i].Thickness=thk+2; CL["O"..i].Visible=true end
-            CL["L"..i].From=V2(fromX,fromY); CL["L"..i].To=V2(toX,toY); CL["L"..i].Color=col; CL["L"..i].Thickness=thk; CL["L"..i].Visible=true
-        end
-        if Cross.InnerEnabled then
-            local ig=Cross.InnerGap; local is2=Cross.InnerSize
-            for i=1,drawCount do
-                local dx,dy=rawDirs[i][1],rawDirs[i][2]; local rx=dx*cr-dy*sr; local ry=dx*sr+dy*cr
-                CL["IL"..i].From=V2(x+rx*ig,y+ry*ig); CL["IL"..i].To=V2(x+rx*(ig+is2),y+ry*(ig+is2))
-                CL["IL"..i].Color=col; CL["IL"..i].Thickness=thk; CL["IL"..i].Visible=true
-            end
-        end
-        if Cross.CenterDotEnabled then
-            if Cross.Outline then CL.CDO.Position=anchor; CL.CDO.Radius=Cross.CenterDotRadius+1.5; CL.CDO.Color=outCol; CL.CDO.Filled=true; CL.CDO.Visible=true end
-            CL.CD.Position=anchor; CL.CD.Radius=Cross.CenterDotRadius
-            CL.CD.Color=Cross.RainbowColor and Rainbow() or Cross.CenterDotColor
-            CL.CD.Filled=Cross.CenterDotFilled; CL.CD.Visible=true
-        end
-    end
-end
-
-
 local FlyConnection=nil; local _flyBV=nil; local _flyBG=nil; local _flyAtt=nil
 local function DisableFly()
     Move.Fly=false
@@ -1214,6 +1264,34 @@ RunService.Stepped:Connect(function()
     end
 end)
 
+do
+    local _sprintVIM = game:GetService("VirtualInputManager")
+    local _sprintKeyHeld = false
+
+    local function _setShiftHeld(hold)
+        if hold == _sprintKeyHeld then return end
+        _sprintKeyHeld = hold
+        _sprintVIM:SendKeyEvent(hold, Enum.KeyCode.LeftShift, false, game)
+    end
+
+    RunService.Heartbeat:Connect(function()
+        if not InstantSprint.Enabled then
+            _setShiftHeld(false)
+            return
+        end
+        local char = LP.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        local moving = hum and hum.MoveDirection.Magnitude > 0.1
+        _setShiftHeld(moving == true)
+        -- max out the sprint ramp-up timer so full speed is instant
+        pcall(function()
+            local cc = getrenv()._G.core_checkers
+            if cc and cc.sprinting and cc.sprint_ticker ~= nil then
+                cc.sprint_ticker = 9999
+            end
+        end)
+    end)
+end
 
 local function MakeBeamPart(name,from3D,to3D,thickness,color,material,transparency)
     local dist=(to3D-from3D).Magnitude
@@ -1538,18 +1616,37 @@ local function GDGetTarget(origin)
         if screenDist > Rage.FOV * 1.5 then continue end
 
         local tPart
-        if conscriptMode or not eChar:FindFirstChild("helmet") or eChar:FindFirstChild("helmetgone") then
-            tPart = head
-        else
-            local class = eChar:FindFirstChild("class") and eChar.class.Value
-            if not gunPL or not class then
-                tPart = root
-            elseif class == "lancer" then
-                tPart = (gunPL == 5) and head or root
-            elseif class == "vanguard" then
-                tPart = (gunPL >= 3) and head or root
+        if Rage.HitPart == "Head" then
+            tPart = eChar:FindFirstChild("HeadHitbox") or eChar:FindFirstChild("Head") or root
+        elseif Rage.HitPart == "Torso" then
+            tPart = eChar:FindFirstChild("Torso") or eChar:FindFirstChild("UpperTorso") or root
+        elseif Rage.HitPart == "Closest to Mouse" then
+            local bestPart, bestDist = root, math.huge
+            for _, pName in ipairs({"HeadHitbox","Head","Torso","UpperTorso","LowerTorso","HumanoidRootPart"}) do
+                local p = eChar:FindFirstChild(pName)
+                if p then
+                    local ps, pon = Camera:WorldToViewportPoint(p.Position)
+                    if pon then
+                        local d = (V2(ps.X, ps.Y) - mousePos).Magnitude
+                        if d < bestDist then bestDist = d; bestPart = p end
+                    end
+                end
+            end
+            tPart = bestPart
+        else -- Auto
+            if conscriptMode or not eChar:FindFirstChild("helmet") or eChar:FindFirstChild("helmetgone") then
+                tPart = head
             else
-                tPart = (gunPL >= 2) and head or root
+                local class = eChar:FindFirstChild("class") and eChar.class.Value
+                if not gunPL or not class then
+                    tPart = root
+                elseif class == "lancer" then
+                    tPart = (gunPL == 5) and head or root
+                elseif class == "vanguard" then
+                    tPart = (gunPL >= 3) and head or root
+                else
+                    tPart = (gunPL >= 2) and head or root
+                end
             end
         end
         if not tPart then continue end
@@ -1588,6 +1685,92 @@ local function GDGetTarget(origin)
 
     return cPart, cOffset
 end
+
+local function GDGetAxeTarget()
+    if not (_gdNationT and _gdEmpireT) then return nil end
+    local char = LP.Character
+    if not char then return nil end
+    local eFolder = char.Parent == _gdEmpireT and _gdNationT or _gdEmpireT
+    if not eFolder then return nil end
+
+    local mousePos = UIS:GetMouseLocation()
+    local best, bestDist = nil, Rage.FOV
+
+    for _, eChar in next, eFolder:GetChildren() do
+        local hum = eChar:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then continue end
+        local root = eChar:FindFirstChild("Torso") or eChar.PrimaryPart
+        if not root then continue end
+
+        local rs, onScreen = Camera:WorldToViewportPoint(root.Position)
+        if not onScreen then continue end
+        if (V2(rs.X, rs.Y) - mousePos).Magnitude > Rage.FOV * 1.5 then continue end
+
+        local tPart
+        if Rage.HitPart == "Head" then
+            tPart = eChar:FindFirstChild("HeadHitbox") or eChar:FindFirstChild("Head") or root
+        elseif Rage.HitPart == "Torso" then
+            tPart = eChar:FindFirstChild("Torso") or eChar:FindFirstChild("UpperTorso") or root
+        else -- "Closest to Mouse"
+            local bp, bd = root, math.huge
+            for _, n in ipairs({"HeadHitbox","Head","Torso","UpperTorso","LowerTorso","HumanoidRootPart"}) do
+                local p = eChar:FindFirstChild(n)
+                if p then
+                    local ps, pon = Camera:WorldToViewportPoint(p.Position)
+                    if pon then
+                        local d = (V2(ps.X, ps.Y) - mousePos).Magnitude
+                        if d < bd then bd = d; bp = p end
+                    end
+                end
+            end
+            tPart = bp
+        end
+        if not tPart then continue end
+
+        local ts, ton = Camera:WorldToViewportPoint(tPart.Position)
+        if not ton then continue end
+        local dist = (V2(ts.X, ts.Y) - mousePos).Magnitude
+        if dist < bestDist then bestDist = dist; best = tPart end
+    end
+    return best
+end
+
+-- Hook equipment_handler:Fire to redirect throwaxe hits
+task.defer(function()
+    local timeout = tick() + 60
+    local ge
+    repeat
+        task.wait(1)
+        pcall(function() ge = getrenv() end)
+    until (ge and ge._G and ge._G.events and ge._G.events.equipment_handler) or tick() > timeout
+
+    if not ge or not ge._G then return end
+    local eqH = ge._G.events.equipment_handler
+    if not eqH then return end
+
+    -- Direct table field replacement avoids hookfunction recursion
+    local ok = pcall(function()
+        local origFire = eqH.Fire
+        eqH.Fire = newcclosure(function(self, data)
+            if Rage.Enabled
+            and type(data) == "table"
+            and data.tool ~= nil
+            and data.hit  ~= nil
+            and data.point ~= nil
+            and data.origin ~= nil then
+                local target = GDGetAxeTarget()
+                if target then
+                    data.hit   = target
+                    data.point = target.Position
+                end
+            end
+            return origFire(self, data)
+        end)
+    end)
+    if not ok then
+        warn("[GD] equipment_handler hook failed — axe silent aim inactive")
+    end
+end)
 
 local _rageLastFOVVisible = false
 local function RageUpdateVisuals()
@@ -1701,6 +1884,30 @@ pcall(function()
         local dest     = rawget(args,"destination")
 
         if isBullet and origin and dest then
+            if WeaponMods.WallPierce then
+                pcall(function()
+                    local wpParams = RaycastParams.new()
+                    wpParams.FilterType = Enum.RaycastFilterType.Include
+                    local chars = {}
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        if p ~= LP and p.Character then chars[#chars+1] = p.Character end
+                    end
+                    if #chars == 0 then return end
+                    wpParams.FilterDescendantsInstances = chars
+                    local dir = dest.Magnitude > 0 and dest.Unit or Camera.CFrame.LookVector
+                    local wpResult = workspace:Raycast(origin, dir * 2000, wpParams)
+                    if not wpResult or not wpResult.Instance then return end
+                    local dh = _killAuraGetDH()
+                    local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+                    local mod = tool and (_killAuraResolveModule(tool) or _killAuraLastModule)
+                    if dh and tool and mod then
+                        dh:Fire(wpResult.Instance, tool, "gun", mod, "", false, 1)
+                        if BulletTracers.Enabled then
+                            task.spawn(SpawnBeamTracer, origin, wpResult.Position)
+                        end
+                    end
+                end)
+            end
             local c = RageCurrentTarget
             if Rage.Enabled and c and RageShouldHit() then
                 local aimPos = RageTargetOffset
@@ -1811,6 +2018,7 @@ local function WM_ApplyToStat(tbl)
                 fire_rate          = tbl.fire_rate,
                 cycle              = tbl.cycle,
                 cycle_rest         = tbl.cycle_rest,
+                capacity           = tbl.capacity,
                 special_incendiary = type(tbl.special) == "table" and tbl.special.incendiary or nil,
             }
         end
@@ -1851,6 +2059,9 @@ local function WM_ApplyToStat(tbl)
             if type(tbl.special) ~= "table" then tbl.special = {} end
             tbl.special.incendiary = true
         end
+        if WeaponMods.InfiniteAmmo then
+            tbl.capacity = 9999
+        end
     end)
 end
 
@@ -1881,6 +2092,130 @@ local function WM_PatchAll()
         end
     end
     return count
+end
+
+local function KS_InstantReload()
+    if KSAutoReload._reloading then return end
+    local char = LP.Character
+    if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then Notify("Kingslayer","No tool equipped","Error",2); return end
+    local slotInst = tool:FindFirstChild("slot")
+    if not slotInst then Notify("Kingslayer","No slot value","Error",2); return end
+    local slot = slotInst.Value
+
+    local ws, cyl_ref
+    -- getrenv() gives the real game _G, separate from the executor's patched _G
+    local ok, renv = pcall(getrenv)
+    if ok and renv and renv._G then
+        ws = renv._G["walkerstate"..slot]
+        if ws then
+            for i = 1, 6 do ws[i] = {cap=true, ball=true, powder=0.9} end
+            renv._G["walkercylinder"..slot] = 1
+            Notify("Kingslayer","Instant reload!","Success",2)
+            return
+        end
+    end
+    -- fallback: try executor _G directly (some exploits alias it)
+    if _G and _G["walkerstate"..slot] then
+        ws = _G["walkerstate"..slot]
+        for i = 1, 6 do ws[i] = {cap=true, ball=true, powder=0.9} end
+        if _G["walkercylinder"..slot] then _G["walkercylinder"..slot] = 1 end
+        Notify("Kingslayer","Instant reload!","Success",2)
+        return
+    end
+    Notify("Kingslayer","State not accessible — use normal reload","Warning",3)
+end
+
+local function KS_DoReload()
+    if KSAutoReload._reloading then return end
+    local char = LP.Character
+    if not char then return end
+
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then Notify("Kingslayer", "No tool equipped", "Error", 2); return end
+    local slotInst = tool:FindFirstChild("slot")
+    if not slotInst then Notify("Kingslayer", "No slot value on tool", "Error", 2); return end
+    local slot = slotInst.Value
+
+    KSAutoReload._reloading = true
+    task.spawn(function()
+        local VIM = game:GetService("VirtualInputManager")
+        local vp  = workspace.CurrentCamera.ViewportSize
+        local cx, cy = math.floor(vp.X / 2), math.floor(vp.Y / 2)
+
+        local function tap(kc)
+            VIM:SendKeyEvent(true,  kc, false, game)
+            task.wait(0.09)
+            VIM:SendKeyEvent(false, kc, false, game)
+        end
+
+        local function hold(kc, dur)
+            VIM:SendKeyEvent(true, kc, false, game)
+            task.wait(dur)
+            VIM:SendKeyEvent(false, kc, false, game)
+        end
+
+        local function clickM1()
+            VIM:SendMouseButtonEvent(cx, cy, 0, true,  game, 1)
+            task.wait(0.3)
+            VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        end
+
+        local function alive()
+            local c = LP.Character
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            return h and h.Health > 0
+        end
+
+        -- resolve the game's actual "alt" keybind (Q by default) via the real game env
+        local altKey = Enum.KeyCode.Q
+        local _okRenv, _renv = pcall(getrenv)
+        if _okRenv and _renv and _renv._G and type(_renv._G.get_keybinds) == "function" then
+            local _okKb, _kb = pcall(_renv._G.get_keybinds, "alt")
+            if _okKb and typeof(_kb) == "EnumItem" then altKey = _kb end
+        end
+
+        local ok, err = pcall(function()
+            tap(Enum.KeyCode.R)
+            task.wait(0.65)
+
+            Notify("Kingslayer", "Reloading "..KSAutoReload.Chambers.." chamber(s)...", "Info", 35)
+
+            for _ = 1, KSAutoReload.Chambers do
+                if not alive() then break end
+
+                if KSAutoReload.SpentCaps then
+                    tap(Enum.KeyCode.One)   -- remove spent cap
+                    task.wait(0.85)
+                end
+                tap(Enum.KeyCode.One)   -- add new cap (gate 0.75s)
+                task.wait(0.85)
+
+                hold(Enum.KeyCode.Two, 1.65)  -- 0.75s init + 0.9s fill
+                task.wait(1.1)
+
+                tap(altKey)             -- add lead ball (gate 0.75s)
+                task.wait(0.95)
+
+                clickM1()               -- index cylinder (delay(0.3)+u251+0.5 = 0.8s total block)
+                task.wait(0.85)
+
+                tap(Enum.KeyCode.Three) -- seat ball (gate 1.5s)
+                task.wait(1.8)
+            end
+
+            if alive() then
+                tap(Enum.KeyCode.R)
+                Notify("Kingslayer", "Reload complete!", "Success", 2)
+            end
+        end)
+
+        if not ok then
+            pcall(function() Notify("Kingslayer", "Reload error: "..tostring(err), "Error", 3) end)
+        end
+        KSAutoReload._reloading = false
+    end)
 end
 
 
@@ -1943,6 +2278,7 @@ local function RageCleanup()
     RageCurrentTarget=nil; RageTargetOffset=false; RageTargetInRange=false; SpinbotStop(); HitboxRestore()
 end
 
+local _ammoRepatchTimer = 0
 RunService.Heartbeat:Connect(function(dt)
     if Rage.TPWalk then
         local char=LP.Character; if char then
@@ -1956,6 +2292,13 @@ RunService.Heartbeat:Connect(function(dt)
     elseif _spinBAV then SpinbotStop() end
     if Rage.HitboxExpander then
         local now=tick(); if now-_hitboxLastUpdate>=0.5 then _hitboxLastUpdate=now; pcall(HitboxExpand) end
+    end
+    if WeaponMods.InfiniteAmmo then
+        _ammoRepatchTimer = _ammoRepatchTimer + dt
+        if _ammoRepatchTimer >= 0.1 then
+            _ammoRepatchTimer = 0
+            pcall(WM_PatchAll)
+        end
     end
 end)
 LP.CharacterAdded:Connect(function()
@@ -2031,6 +2374,94 @@ task.spawn(function()
     end
 end)
 
+
+-- ── Medical / Heal ───────────────────────────────────────────────────
+local MedHeal = {
+    AutoHealEnabled = false,
+    HealAuraEnabled = false,
+    HealThreshold   = 50,   -- % of max HP before auto-heal fires on self
+    HealAuraRange   = 30,   -- studs
+    HealAuraTarget  = "Teammates", -- "Teammates", "Enemies", "Everyone"
+    Cooldown        = 0.1,  -- seconds between heals per target
+}
+local _medHandler  = nil
+local _medLastHeal = {}
+
+local function _getMedHandler()
+    if _medHandler then return _medHandler end
+    if _G and _G.events and _G.events.medical_handler then
+        _medHandler = _G.events.medical_handler
+        return _medHandler
+    end
+    pcall(function()
+        local genv = getgenv and getgenv()
+        if genv and genv.events and genv.events.medical_handler then
+            _medHandler = genv.events.medical_handler
+        end
+    end)
+    if not _medHandler then
+        pcall(function()
+            local ge = getrenv and getrenv()
+            if ge and ge._G and ge._G.events and ge._G.events.medical_handler then
+                _medHandler = ge._G.events.medical_handler
+            end
+        end)
+    end
+    return _medHandler
+end
+
+local function _doHealSelf()
+    local char = LP.Character
+    if not char then return end
+    -- Use healtarget on ourselves — same path heal aura uses, works for all damage types
+    local h = _getMedHandler()
+    if h then pcall(function() h:Fire("healtarget", char) end) end
+end
+
+local function _doHealTarget(targetChar)
+    local h = _getMedHandler(); if not h then return end
+    pcall(function() h:Fire("healtarget", targetChar) end)
+end
+
+task.spawn(function()
+    while true do
+        RunService.Heartbeat:Wait()
+        local now  = tick()
+        local char = LP.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+
+        if MedHeal.AutoHealEnabled and hum and hrp then
+            if hum.Health > 0 and hum.Health < hum.MaxHealth * (MedHeal.HealThreshold / 100) then
+                local key = LP.UserId
+                if not _medLastHeal[key] or now - _medLastHeal[key] >= MedHeal.Cooldown then
+                    _medLastHeal[key] = now
+                    _doHealSelf()
+                end
+            end
+        end
+
+        if MedHeal.HealAuraEnabled and hrp then
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr == LP then continue end
+                local tChar = plr.Character; if not tChar then continue end
+                local tHum  = tChar:FindFirstChildOfClass("Humanoid")
+                local tHrp  = tChar:FindFirstChild("HumanoidRootPart")
+                if not tHum or not tHrp then continue end
+                if tHum.Health <= 0 or tHum.Health >= tHum.MaxHealth then continue end
+                if (hrp.Position - tHrp.Position).Magnitude > MedHeal.HealAuraRange then continue end
+                local mode = MedHeal.HealAuraTarget
+                if mode == "Teammates" and plr.Team ~= LP.Team then continue end
+                if mode == "Enemies"   and plr.Team == LP.Team then continue end
+                local key = plr.UserId
+                if not _medLastHeal[key] or now - _medLastHeal[key] >= MedHeal.Cooldown then
+                    _medLastHeal[key] = now
+                    _doHealTarget(tChar)
+                end
+            end
+        end
+    end
+end)
 
 local _autoMineRayParams = RaycastParams.new()
 _autoMineRayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -2109,14 +2540,14 @@ local _renderFrame = 0
 local RenderConnection = RunService.RenderStepped:Connect(function()
     _renderFrame = _renderFrame + 1
     pcall(function()
-        UpdateAimbot(); UpdateCrosshair(); RageUpdateVisuals()
+        UpdateAimbot(); RageUpdateVisuals()
     end)
 end)
 
 local _kitFrame = 0
 RunService.Heartbeat:Connect(function()
     _kitFrame = _kitFrame + 1
-    if _kitFrame % 3 == 0 then pcall(kitUpdateLoop) end
+    if _kitFrame % 3 == 0 then pcall(kitUpdateLoop); pcall(_G.TrapESP.update) end
 end)
 
 local _configLoading = false
@@ -2134,6 +2565,12 @@ UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == _menuKeybind then
         pcall(function() Window:Toggle() end)
+    end
+    if KSAutoReload.Enabled and input.KeyCode == KSAutoReload.Keybind then
+        if not KSAutoReload._reloading then KS_DoReload() end
+    end
+    if KSAutoReload.InstantEnabled and input.KeyCode == KSAutoReload.InstantKeybind then
+        KS_InstantReload()
     end
 end)
 
@@ -2376,16 +2813,12 @@ end)
 
 
 
+local AimbotTab = Window:AddTab({ Name="Aim", Icon=Hyperion.Lucide.Target })
+
 do
-
-
-local AimbotTab = Window:AddTab({ Name="Aimbot", Icon=Hyperion.Lucide.Target })
 
 local AimCoreL = AimbotTab:AddSection({ Name="Core Settings", Side="Left", Group="Aimbot" })
 local AimCoreR = AimbotTab:AddSection({ Name="Targeting",     Side="Right", Group="Aimbot" })
-
-local FOVSec   = AimbotTab:AddSection({ Name="FOV Circle",  Side="Left",  Group="FOV & Trigger" })
-local TrigSec  = AimbotTab:AddSection({ Name="Triggerbot",  Side="Right", Group="FOV & Trigger" })
 
 AimCoreL:AddToggle({ Name="Enable Aimbot",   Default=false, Flag="aim_on",  Callback=function(v) Aim.Enabled=v end })
 AimCoreL:AddToggle({ Name="Toggle Mode",     Default=false, Flag="aim_tg",  Callback=function(v) Aim.Toggle=v end })
@@ -2396,29 +2829,17 @@ AimCoreL:AddToggle({ Name="Alive Check",     Default=true,  Flag="aim_ac",  Call
 AimCoreL:AddToggle({ Name="Wall Check",      Default=false, Flag="aim_wc",  Callback=function(v) Aim.WallCheck=v end })
 
 AimCoreL:AddToggle({ Name="Smoothing",       Default=true,  Flag="aim_sm",  Callback=function(v) Aim.Smoothing=v end })
+AimCoreL:AddToggle({ Name="Prediction",     Default=true, Flag="aim_pr",  Callback=function(v) Aim.Prediction=v end })
+
 AimCoreL:AddDropdown({ Name="Smooth Type", Values={"Linear","EaseIn","EaseOut","EaseInOut","Spring"}, Default="Linear", Flag="aim_smt",
     Callback=function(v) Aim.SmoothType=v end })
-AimCoreL:AddSlider({ Name="Smooth Factor", Min=1, Max=100, Default=65, Decimals=0, Suffix="%", Flag="aim_smf",
-    Callback=function(v) Aim.SmoothFactor=v/100 end })
-
-AimCoreL:AddToggle({ Name="Prediction",     Default=true, Flag="aim_pr",  Callback=function(v) Aim.Prediction=v end })
 AimCoreL:AddDropdown({ Name="Pred Mode",   Values={"Velocity","Gravity"}, Default="Velocity", Flag="aim_predm",
     Callback=function(v) Aim.PredMode=v end })
+
+AimCoreL:AddSlider({ Name="Smooth Factor", Min=1, Max=100, Default=65, Decimals=0, Suffix="%", Flag="aim_smf",
+    Callback=function(v) Aim.SmoothFactor=v/100 end })
 AimCoreL:AddSlider({ Name="Pred Strength", Min=0, Max=100, Default=15, Decimals=0, Suffix="%", Flag="aim_prs",
     Callback=function(v) Aim.PredStrength=v/100 end })
-
-AimCoreR:AddDropdown({ Name="Lock Part",   Values={"Head","HumanoidRootPart","UpperTorso","Torso","LowerTorso"}, Default="Head",             Flag="aim_part", Callback=function(v) Aim.LockPart=v end })
-AimCoreR:AddDropdown({ Name="Lock Mode",   Values={"CamLock","MouseMove","ThirdPersonMouse"},                    Default="ThirdPersonMouse", Flag="aim_mode", Callback=function(v) Aim.LockMode=v end })
-AimCoreR:AddDropdown({ Name="Select Mode", Values={"ClosestToMouse","ClosestToCenter","LowestHealth","HighestHealth"}, Default="ClosestToMouse", Flag="aim_sel", Callback=function(v) Aim.SelectMode=v end })
-
-AimCoreR:AddSlider({ Name="Max Distance", Min=100, Max=5000, Default=2000, Decimals=0, Suffix=" studs", Flag="aim_md",
-    Callback=function(v) Aim.MaxDistance=v end })
-AimCoreR:AddSlider({ Name="Sticky Time",  Min=1, Max=50, Default=15, Decimals=0, Suffix="x0.1s", Flag="aim_stkt",
-    Callback=function(v) Aim.StickyTime=v/10 end })
-AimCoreR:AddSlider({ Name="Offset X",     Min=-50, Max=50, Default=0, Decimals=0, Flag="aim_ox",
-    Callback=function(v) Aim.OffsetX=v end })
-AimCoreR:AddSlider({ Name="Offset Y",     Min=-50, Max=50, Default=0, Decimals=0, Flag="aim_oy",
-    Callback=function(v) Aim.OffsetY=v end })
 
 local _aimKeyOptions = {
     "Mouse1", "Mouse2", "Mouse3",
@@ -2450,6 +2871,9 @@ Aim.TriggerKey     = Enum.UserInputType.MouseButton2
 Aim.TriggerKeyType = "mouse"
 Aim.TriggerKeyVal  = Enum.UserInputType.MouseButton2
 
+AimCoreR:AddDropdown({ Name="Lock Part",   Values={"Head","HumanoidRootPart","UpperTorso","Torso","LowerTorso"}, Default="Head",             Flag="aim_part", Callback=function(v) Aim.LockPart=v end })
+AimCoreR:AddDropdown({ Name="Lock Mode",   Values={"CamLock","MouseMove","ThirdPersonMouse"},                    Default="ThirdPersonMouse", Flag="aim_mode", Callback=function(v) Aim.LockMode=v end })
+AimCoreR:AddDropdown({ Name="Select Mode", Values={"ClosestToMouse","ClosestToCenter","LowestHealth","HighestHealth"}, Default="ClosestToMouse", Flag="aim_sel", Callback=function(v) Aim.SelectMode=v end })
 AimCoreR:AddDropdown({ Name="Aim Key", Values=_aimKeyOptions, Default="Mouse2", Flag="aim_key_sel",
     Callback=function(v)
         local mapped = _aimKeyMap[v]
@@ -2463,48 +2887,21 @@ AimCoreR:AddDropdown({ Name="Aim Key", Values=_aimKeyOptions, Default="Mouse2", 
         Notify("Aimbot","Aim key set to: "..v,"Info",2)
     end })
 
-FOVSec:AddToggle({ Name="Show FOV",   Default=true,  Flag="fov_show", Callback=function(v) Aim.FOVEnabled=v; Aim.FOVVisible=v end })
-FOVSec:AddToggle({ Name="Aim Dot",    Default=false, Flag="fov_dot",  Callback=function(v) Aim.AimDotEnabled=v end })
-
-FOVSec:AddSlider({ Name="FOV Radius",       Min=10,  Max=600, Default=90,  Decimals=0, Suffix="px", Flag="fov_r",  Callback=function(v) Aim.FOVRadius=v end })
-FOVSec:AddSlider({ Name="FOV Transparency", Min=0,   Max=100, Default=80,  Decimals=0, Suffix="%",  Flag="fov_tr", Callback=function(v) Aim.FOVTransparency=v/100 end })
-FOVSec:AddSlider({ Name="FOV Thickness",    Min=1,   Max=4,   Default=1,   Decimals=0,              Flag="fov_th", Callback=function(v) Aim.FOVThickness=v end })
-
-FOVSec:AddColorPicker({ Name="FOV Color",    Default=Color3.fromRGB(255,255,255), Flag="fov_col", Callback=function(c) Aim.FOVColor=c end })
-FOVSec:AddColorPicker({ Name="Locked Color", Default=Color3.fromRGB(255,100,100), Flag="fov_lc",  Callback=function(c) Aim.FOVLockedColor=c end })
-FOVSec:AddColorPicker({ Name="Dot Color",    Default=Color3.fromRGB(255,255,255), Flag="fov_dc",  Callback=function(c) Aim.AimDotColor=c end })
-
-FOVSec:AddToggle({ Name="Gradient Fill FOV", Default=false, Flag="fov_gfill",
-    Callback=function(v) Aim.FOVGradFill=v end })
-FOVSec:AddColorPicker({ Name="Fill Color Top",    Default=Color3.fromRGB(255,50,200),  Flag="fov_gct", Callback=function(c) Aim.FOVGradColorTop=c end })
-FOVSec:AddColorPicker({ Name="Fill Color Bottom", Default=Color3.fromRGB(50,150,255),  Flag="fov_gcb", Callback=function(c) Aim.FOVGradColorBot=c end })
-FOVSec:AddSlider({ Name="Fill Opacity Top",    Min=0, Max=100, Default=10, Decimals=0, Suffix="%", Flag="fov_gat",
-    Callback=function(v) Aim.FOVGradAlphaTop=1-v/100 end })
-FOVSec:AddSlider({ Name="Fill Opacity Bottom", Min=0, Max=100, Default=60, Decimals=0, Suffix="%", Flag="fov_gab",
-    Callback=function(v) Aim.FOVGradAlphaBot=1-v/100 end })
-
-FOVSec:AddToggle({ Name="FOV Watermark", Default=false, Flag="fov_wm",
-    Callback=function(v) Aim.FOVWatermark=v end })
-FOVSec:AddColorPicker({ Name="Watermark Color", Default=Color3.fromRGB(255,255,255), Flag="fov_wmc",
-    Callback=function(c) Aim.FOVWatermarkColor=c end })
-FOVSec:AddSlider({ Name="Watermark Size", Min=8, Max=24, Default=13, Decimals=0, Flag="fov_wms",
-    Callback=function(v) Aim.FOVWatermarkSize=v end })
-
-TrigSec:AddToggle({ Name="Enable Triggerbot", Default=false, Flag="trig_on", Callback=function(v) Aim.TriggerEnabled=v end })
-TrigSec:AddToggle({ Name="Team Check",        Default=false, Flag="trig_tc", Callback=function(v) Aim.TriggerTeamCheck=v end })
-TrigSec:AddToggle({ Name="Wall Check",        Default=false, Flag="trig_wc", Callback=function(v) Aim.TriggerWallCheck=v end })
-
-TrigSec:AddSlider({ Name="Delay",           Min=0, Max=500, Default=50, Decimals=0, Suffix="ms", Flag="trig_del", Callback=function(v) Aim.TriggerDelay=v/1000 end })
-TrigSec:AddSlider({ Name="Pixel Threshold", Min=5, Max=80,  Default=20, Decimals=0, Suffix="px", Flag="trig_px",  Callback=function(v) Aim.TriggerPixelThreshold=v end })
+AimCoreR:AddSlider({ Name="Max Distance", Min=100, Max=5000, Default=2000, Decimals=0, Suffix=" studs", Flag="aim_md",
+    Callback=function(v) Aim.MaxDistance=v end })
+AimCoreR:AddSlider({ Name="Sticky Time",  Min=1, Max=50, Default=15, Decimals=0, Suffix="x0.1s", Flag="aim_stkt",
+    Callback=function(v) Aim.StickyTime=v/10 end })
+AimCoreR:AddSlider({ Name="Offset X",     Min=-50, Max=50, Default=0, Decimals=0, Flag="aim_ox",
+    Callback=function(v) Aim.OffsetX=v end })
+AimCoreR:AddSlider({ Name="Offset Y",     Min=-50, Max=50, Default=0, Decimals=0, Flag="aim_oy",
+    Callback=function(v) Aim.OffsetY=v end })
 
 end
 
 do
 
-local RageTab = Window:AddTab({ Name="Rage", Icon=Hyperion.Lucide.Zap })
-
-local RageSilentL = RageTab:AddSection({ Name="Silent Aim",  Side="Left",  Group="Silent Aim" })
-local RageSilentR = RageTab:AddSection({ Name="Target Info", Side="Right", Group="Silent Aim" })
+local RageSilentL = AimbotTab:AddSection({ Name="Silent Aim",  Side="Left",  Group="Silent Aim" })
+local RageSilentR = AimbotTab:AddSection({ Name="Target Info", Side="Right", Group="Silent Aim" })
 RageSilentL:AddToggle({ Name="Enable Silent Aim", Default=false, Flag="rage_on",
     Callback=function(v)
         Rage.Enabled=v
@@ -2514,6 +2911,8 @@ RageSilentL:AddToggle({ Name="Enable Silent Aim", Default=false, Flag="rage_on",
     end })
 RageSilentL:AddToggle({ Name="Wall Check", Default=true, Flag="rage_wc",
     Callback=function(v) Rage.VisibleCheck=v end })
+RageSilentL:AddDropdown({ Name="Hit Part", Values={"Auto","Head","Torso","Closest to Mouse"}, Default="Auto", Flag="rage_hp",
+    Callback=function(v) Rage.HitPart=v end })
 RageSilentL:AddSlider({ Name="FOV Radius",  Min=50, Max=600, Default=150, Decimals=0, Suffix="px", Flag="rage_fov",
     Callback=function(v) Rage.FOV=v; RageFOV.Radius=v end })
 RageSilentL:AddSlider({ Name="Hit Chance",  Min=0,  Max=100, Default=100, Decimals=0, Suffix="%",  Flag="rage_hc",
@@ -2523,15 +2922,57 @@ RageSilentL:AddSlider({ Name="Update Rate", Min=50, Max=500, Default=100, Decima
 RageSilentL:AddColorPicker({ Name="FOV Color", Default=Color3.fromRGB(255,255,255), Flag="rage_fc",
     Callback=function(c) Rage.FOVColor=c; RageFOV.Color=c end })
 
-RageSilentR:AddToggle({ Name="Show Target Info", Default=true, Flag="rage_si",  Callback=function(v) Rage.ShowTargetInfo=v end })
-RageSilentR:AddToggle({ Name="Show Name",        Default=true, Flag="rage_sn",  Callback=function(v) Rage.ShowTargetName=v end })
-RageSilentR:AddToggle({ Name="Show HP",          Default=true, Flag="rage_shp", Callback=function(v) Rage.ShowTargetHP=v end })
-RageSilentR:AddToggle({ Name="Show Distance",    Default=true, Flag="rage_sd",  Callback=function(v) Rage.ShowTargetDistance=v end })
-RageSilentR:AddToggle({ Name="Show Hit Chance",  Default=true, Flag="rage_shc", Callback=function(v) Rage.ShowHitChance=v end })
-RageSilentR:AddToggle({ Name="Highlight Target", Default=false,Flag="rage_hl",  Callback=function(v) Rage.HighlightTarget=v end })
+RageSilentR:AddToggle({ Name="Show Target Info", Default=true,  Flag="rage_si",  Callback=function(v) Rage.ShowTargetInfo=v end })
+RageSilentR:AddToggle({ Name="Show Name",        Default=true,  Flag="rage_sn",  Callback=function(v) Rage.ShowTargetName=v end })
+RageSilentR:AddToggle({ Name="Show HP",          Default=true,  Flag="rage_shp", Callback=function(v) Rage.ShowTargetHP=v end })
+RageSilentR:AddToggle({ Name="Show Distance",    Default=true,  Flag="rage_sd",  Callback=function(v) Rage.ShowTargetDistance=v end })
+RageSilentR:AddToggle({ Name="Show Hit Chance",  Default=true,  Flag="rage_shc", Callback=function(v) Rage.ShowHitChance=v end })
+RageSilentR:AddToggle({ Name="Highlight Target", Default=false, Flag="rage_hl",  Callback=function(v) Rage.HighlightTarget=v end })
 
-local WepModL = RageTab:AddSection({ Name="Weapon Mods", Side="Left",  Group="Weapon Mods" })
-local WepModR = RageTab:AddSection({ Name="Info",        Side="Right", Group="Weapon Mods" })
+
+end
+
+do
+
+local TrigSec = AimbotTab:AddSection({ Name="Triggerbot", Side="Left", Group="Triggerbot" })
+
+TrigSec:AddToggle({ Name="Enable Triggerbot", Default=false, Flag="trig_on", Callback=function(v) Aim.TriggerEnabled=v end })
+TrigSec:AddToggle({ Name="Team Check",        Default=false, Flag="trig_tc", Callback=function(v) Aim.TriggerTeamCheck=v end })
+TrigSec:AddToggle({ Name="Wall Check",        Default=false, Flag="trig_wc", Callback=function(v) Aim.TriggerWallCheck=v end })
+
+TrigSec:AddSlider({ Name="Delay",           Min=0, Max=500, Default=50, Decimals=0, Suffix="ms", Flag="trig_del", Callback=function(v) Aim.TriggerDelay=v/1000 end })
+TrigSec:AddSlider({ Name="Pixel Threshold", Min=5, Max=80,  Default=20, Decimals=0, Suffix="px", Flag="trig_px",  Callback=function(v) Aim.TriggerPixelThreshold=v end })
+
+local FOVSec = AimbotTab:AddSection({ Name="FOV Circle", Side="Left", Group="FOV" })
+
+FOVSec:AddToggle({ Name="Show FOV",        Default=true,  Flag="fov_show",  Callback=function(v) Aim.FOVEnabled=v; Aim.FOVVisible=v end })
+FOVSec:AddToggle({ Name="Aim Dot",         Default=false, Flag="fov_dot",   Callback=function(v) Aim.AimDotEnabled=v end })
+FOVSec:AddToggle({ Name="Gradient Fill",   Default=false, Flag="fov_gfill", Callback=function(v) Aim.FOVGradFill=v end })
+FOVSec:AddToggle({ Name="FOV Watermark",   Default=false, Flag="fov_wm",    Callback=function(v) Aim.FOVWatermark=v end })
+
+FOVSec:AddSlider({ Name="FOV Radius",         Min=10,  Max=600, Default=90,  Decimals=0, Suffix="px", Flag="fov_r",   Callback=function(v) Aim.FOVRadius=v end })
+FOVSec:AddSlider({ Name="FOV Transparency",   Min=0,   Max=100, Default=80,  Decimals=0, Suffix="%",  Flag="fov_tr",  Callback=function(v) Aim.FOVTransparency=v/100 end })
+FOVSec:AddSlider({ Name="FOV Thickness",      Min=1,   Max=4,   Default=1,   Decimals=0,              Flag="fov_th",  Callback=function(v) Aim.FOVThickness=v end })
+FOVSec:AddSlider({ Name="Fill Opacity Top",   Min=0,   Max=100, Default=10,  Decimals=0, Suffix="%",  Flag="fov_gat", Callback=function(v) Aim.FOVGradAlphaTop=1-v/100 end })
+FOVSec:AddSlider({ Name="Fill Opacity Bottom",Min=0,   Max=100, Default=60,  Decimals=0, Suffix="%",  Flag="fov_gab", Callback=function(v) Aim.FOVGradAlphaBot=1-v/100 end })
+FOVSec:AddSlider({ Name="Watermark Size",     Min=8,   Max=24,  Default=13,  Decimals=0,              Flag="fov_wms", Callback=function(v) Aim.FOVWatermarkSize=v end })
+
+FOVSec:AddColorPicker({ Name="FOV Color",        Default=Color3.fromRGB(255,255,255), Flag="fov_col", Callback=function(c) Aim.FOVColor=c end })
+FOVSec:AddColorPicker({ Name="Locked Color",     Default=Color3.fromRGB(255,100,100), Flag="fov_lc",  Callback=function(c) Aim.FOVLockedColor=c end })
+FOVSec:AddColorPicker({ Name="Dot Color",        Default=Color3.fromRGB(255,255,255), Flag="fov_dc",  Callback=function(c) Aim.AimDotColor=c end })
+FOVSec:AddColorPicker({ Name="Fill Color Top",   Default=Color3.fromRGB(255,50,200),  Flag="fov_gct", Callback=function(c) Aim.FOVGradColorTop=c end })
+FOVSec:AddColorPicker({ Name="Fill Color Bottom",Default=Color3.fromRGB(50,150,255),  Flag="fov_gcb", Callback=function(c) Aim.FOVGradColorBot=c end })
+FOVSec:AddColorPicker({ Name="Watermark Color",  Default=Color3.fromRGB(255,255,255), Flag="fov_wmc", Callback=function(c) Aim.FOVWatermarkColor=c end })
+
+end
+
+local RageTab    = Window:AddTab({ Name="Rage",    Icon=Hyperion.Lucide.Zap })
+local WeaponsTab = Window:AddTab({ Name="Weapons", Icon=Hyperion.Lucide.Wrench })
+
+do
+
+local WepModL = WeaponsTab:AddSection({ Name="Weapon Mods", Side="Left",  Group="Weapon Mods" })
+local WepModR = WeaponsTab:AddSection({ Name="Info",        Side="Right", Group="Weapon Mods" })
 
 WepModL:AddToggle({ Name="No Spread", Default=false, Flag="wm_ns",
     Callback=function(v)
@@ -2575,7 +3016,56 @@ WepModL:AddToggle({ Name="Incendiary Bullets", Default=false, Flag="wm_inc",
         if not _configLoading then WM_PatchAll(); Notify("Weapons", v and "Incendiary ON" or "Incendiary OFF", v and "Success" or "Warning") end
     end })
 
+WepModL:AddToggle({ Name="Infinite Ammo", Default=false, Flag="wm_ia",
+    Callback=function(v)
+        WeaponMods.InfiniteAmmo = v
+        if not _configLoading then WM_PatchAll(); Notify("Weapons", v and "Infinite Ammo ON" or "Infinite Ammo OFF", v and "Success" or "Warning") end
+    end })
+
+WepModL:AddToggle({ Name="Wall Pierce", Default=false, Flag="wm_wp",
+    Callback=function(v)
+        WeaponMods.WallPierce = v
+        if not _configLoading then Notify("Weapons", v and "Wall Pierce ON" or "Wall Pierce OFF", v and "Success" or "Warning") end
+    end })
+
 WepModR:AddInfobox({ Title="Note", Text="You must reset your character to apply weapon mods.", Type="Warning" })
+
+local KSSec = WeaponsTab:AddSection({ Name="Legit Reload", Side="Left", Group="Kingslayer" })
+KSSec:AddToggle({ Name="Enable Legit Reload", Default=false, Flag="ks_ar_on",
+    Callback=function(v)
+        KSAutoReload.Enabled = v
+        if not _configLoading then Notify("Kingslayer", v and "Legit Reload ON (press G)" or "Legit Reload OFF", v and "Success" or "Warning") end
+    end })
+KSSec:AddToggle({ Name="Remove Spent Caps First", Default=false, Flag="ks_ar_caps",
+    Callback=function(v) KSAutoReload.SpentCaps = v end })
+KSSec:AddSlider({ Name="Chambers to Reload", Min=1, Max=6, Default=6, Decimals=0, Flag="ks_ar_ch",
+    Callback=function(v) KSAutoReload.Chambers = v end })
+KSSec:AddKeybind({ Name="Legit Keybind", Default=Enum.KeyCode.G, Flag="ks_ar_kb",
+    Callback=function(v)
+        if typeof(v) == "EnumItem" then KSAutoReload.Keybind = v end
+    end })
+KSSec:AddButton({ Name="Reload Now", Icon=nil,
+    Callback=function()
+        if not KSAutoReload._reloading then KS_DoReload()
+        else Notify("Kingslayer", "Already reloading...", "Warning") end
+    end })
+
+local KSBlatantSec = WeaponsTab:AddSection({ Name="Instant Reload", Side="Right", Group="Kingslayer" })
+KSBlatantSec:AddToggle({ Name="Enable Instant Reload", Default=false, Flag="ks_instant_on",
+    Callback=function(v)
+        KSAutoReload.InstantEnabled = v
+        if not _configLoading then Notify("Kingslayer", v and "Instant Reload ON (press H)" or "Instant Reload OFF", v and "Success" or "Warning") end
+    end })
+KSBlatantSec:AddKeybind({ Name="Reload Keybind", Default=Enum.KeyCode.H, Flag="ks_instant_kb",
+    Callback=function(v)
+        if typeof(v) == "EnumItem" then KSAutoReload.InstantKeybind = v end
+    end })
+KSBlatantSec:AddButton({ Name="Instant Reload Now", Icon=nil,
+    Callback=function() KS_InstantReload() end })
+
+end
+
+do
 
 local KillAuraSec = RageTab:AddSection({ Name="Kill Aura", Side="Left", Group="Kill Aura" })
 local KillAuraInfo = RageTab:AddSection({ Name="Info", Side="Right", Group="Kill Aura" })
@@ -2593,10 +3083,10 @@ local _kaToggle = KillAuraSec:AddToggle({ Name="Enable Kill Aura", Default=false
     end })
 KillAuraSec:AddToggle({ Name="Require Tool Equipped", Default=true, Flag="ka_rt",
     Callback=function(v) KillAura.RequireTool = v end })
-KillAuraSec:AddSlider({ Name="Range", Min=10, Max=2000, Default=300, Decimals=0, Suffix=" studs", Flag="ka_rng",
-    Callback=function(v) KillAura.Range = v end })
 KillAuraSec:AddDropdown({ Name="Damage Type", Values={"Gun","Melee"}, Default="Gun", Flag="ka_dt",
     Callback=function(v) KillAura.DamageType = v end })
+KillAuraSec:AddSlider({ Name="Range", Min=10, Max=2000, Default=300, Decimals=0, Suffix=" studs", Flag="ka_rng",
+    Callback=function(v) KillAura.Range = v end })
 KillAuraSec:AddKeybind({ Name="Kill Aura Keybind", Default=Enum.KeyCode.K, Flag="ka_kb",
     Callback=function()
         local newVal = not KillAura.Enabled
@@ -2611,6 +3101,32 @@ KillAuraInfo:AddInfobox({ Title="Note", Text="You must hold out a weapon.", Type
 
 end
 
+do
+
+local HealSec  = RageTab:AddSection({ Name="Medical",   Side="Left",  Group="Medic" })
+local HealInfo = RageTab:AddSection({ Name="Info",      Side="Right", Group="Medic" })
+
+HealSec:AddToggle({ Name="Auto Heal (Self)", Default=false, Flag="ah_on",
+    Callback=function(v)
+        MedHeal.AutoHealEnabled = v
+        if not _configLoading then Notify("Medical", v and "Auto Heal ON" or "Auto Heal OFF", v and "Success" or "Warning") end
+    end })
+HealSec:AddToggle({ Name="Heal Aura", Default=false, Flag="ha_on",
+    Callback=function(v)
+        MedHeal.HealAuraEnabled = v
+        if not _configLoading then Notify("Medical", v and "Heal Aura ON" or "Heal Aura OFF", v and "Success" or "Warning") end
+    end })
+
+HealSec:AddDropdown({ Name="Heal Aura Target", Values={"Teammates","Enemies","Everyone"}, Default="Teammates", Flag="ha_tgt",
+    Callback=function(v) MedHeal.HealAuraTarget=v end })
+HealSec:AddSlider({ Name="HP Threshold",  Min=10,  Max=100,  Default=50, Decimals=0, Suffix="%",      Flag="ah_thr", Callback=function(v) MedHeal.HealThreshold=v end })
+HealSec:AddSlider({ Name="Aura Range",    Min=5,   Max=5000, Default=30, Decimals=0, Suffix=" studs", Flag="ha_rng", Callback=function(v) MedHeal.HealAuraRange=v end })
+HealSec:AddSlider({ Name="Cooldown",      Min=0,   Max=20,   Default=1,  Decimals=1, Suffix="x0.1s",  Flag="ah_cd",  Callback=function(v) MedHeal.Cooldown=v/10 end })
+
+HealInfo:AddInfobox({ Title="Tip", Text="Auto Heal and Heal Aura work best with the Mortician class.", Type="Info" })
+
+
+end
 
 local _uiRefs = {}
 do
@@ -2635,11 +3151,11 @@ _uiRefs.Distances= ESPLeft:AddToggle({ Name="Distances",       Default=ESP.Drawi
 _uiRefs.Chams    = ESPLeft:AddToggle({ Name="Chams",           Default=ESP.Drawing.Chams.Enabled,         Flag="esp_cham", Callback=function(v) ESP.Drawing.Chams.Enabled=v end })
 
 ESPLeft:AddToggle({ Name="Rainbow Mode",    Default=ESP.Rainbow,                      Flag="esp_rb",   Callback=function(v) ESP.Rainbow=v end })
-ESPLeft:AddSlider({ Name="Rainbow Speed",   Min=1, Max=10, Default=ESP.RainbowSpeed, Decimals=0,      Flag="esp_rbs",  Callback=function(v) ESP.RainbowSpeed=v end })
-
 ESPLeft:AddToggle({ Name="Thermal Breathing",  Default=ESP.Drawing.Chams.Thermal,       Flag="esp_ct",  Callback=function(v) ESP.Drawing.Chams.Thermal=v end })
 ESPLeft:AddToggle({ Name="Chams Visible Check",Default=ESP.Drawing.Chams.VisibleCheck,  Flag="esp_cv",  Callback=function(v) ESP.Drawing.Chams.VisibleCheck=v end })
 ESPLeft:AddToggle({ Name="Animate Fill",       Default=ESP.Drawing.Boxes.Animate,       Flag="esp_ag",  Callback=function(v) ESP.Drawing.Boxes.Animate=v end })
+
+ESPLeft:AddSlider({ Name="Rainbow Speed",   Min=1, Max=10, Default=ESP.RainbowSpeed, Decimals=0,      Flag="esp_rbs",  Callback=function(v) ESP.RainbowSpeed=v end })
 
 ESPLeft:AddButton({ Name="Refresh ESP", Icon=Hyperion.Lucide.RefreshCw,
     Callback=function()
@@ -2649,8 +3165,6 @@ ESPLeft:AddButton({ Name="Refresh ESP", Icon=Hyperion.Lucide.RefreshCw,
         for _, p in ipairs(Players:GetPlayers()) do if p ~= LP then InitializeESP(p) end end
         Notify("ESP","Refreshed.","Success")
     end })
-
-ESPRight:AddSlider({ Name="Max Distance",    Min=0, Max=10000, Default=ESP.MaxDistance, Decimals=0,    Flag="esp_md",   Callback=function(v) ESP.MaxDistance=v end })
 
 _uiRefs.BoxType = ESPRight:AddDropdown({ Name="Box Type",          Values={"None","Box","Corner"},    Default="None",   Flag="esp_bm",
     Callback=function(v)
@@ -2686,13 +3200,6 @@ ESPRight:AddDropdown({ Name="Health Gradient",
             }
         end
     end })
-
-ESPRight:AddSlider({ Name="Healthbar Width",   Min=1, Max=10,   Default=ESP.Drawing.Healthbar.Width,      Decimals=0, Flag="esp_hw",  Callback=function(v) ESP.Drawing.Healthbar.Width=v end })
-ESPRight:AddSlider({ Name="Skeleton Thickness",Min=1, Max=5,    Default=ESP.Drawing.Skeleton.Thickness,   Decimals=0, Flag="esp_st",  Callback=function(v) ESP.Drawing.Skeleton.Thickness=v end })
-ESPRight:AddSlider({ Name="Tracer Thickness",  Min=1, Max=5,    Default=ESP.Drawing.Tracers.Thickness,    Decimals=0, Flag="esp_tt",  Callback=function(v) ESP.Drawing.Tracers.Thickness=v end })
-ESPRight:AddSlider({ Name="Rotation Speed",    Min=0, Max=1000, Default=ESP.Drawing.Boxes.RotationSpeed,  Decimals=0, Flag="esp_rs",  Callback=function(v) ESP.Drawing.Boxes.RotationSpeed=v end })
-ESPRight:AddSlider({ Name="Fill Transparency", Min=0, Max=100,  Default=ESP.Drawing.Boxes.Filled.Transparency*100, Decimals=0, Flag="esp_ft",
-    Callback=function(v) ESP.Drawing.Boxes.Filled.Transparency=v/100 end })
 
 local _espPresets = {
     ["Default"]     = { c1=Color3.fromRGB(200,0,0),   c2=Color3.fromRGB(60,60,125),  c3=Color3.fromRGB(119,120,255) },
@@ -2769,6 +3276,14 @@ ESPRight:AddDropdown({ Name="ESP Preset", Values=_presetNames, Default="Default"
 ESPRight:AddButton({ Name="Apply Preset", Icon=Hyperion.Lucide.Palette,
     Callback=function() ApplyESPPreset(_selectedPreset) end })
 
+ESPRight:AddSlider({ Name="Max Distance",    Min=0, Max=10000, Default=ESP.MaxDistance, Decimals=0,    Flag="esp_md",   Callback=function(v) ESP.MaxDistance=v end })
+ESPRight:AddSlider({ Name="Healthbar Width",   Min=1, Max=10,   Default=ESP.Drawing.Healthbar.Width,      Decimals=0, Flag="esp_hw",  Callback=function(v) ESP.Drawing.Healthbar.Width=v end })
+ESPRight:AddSlider({ Name="Skeleton Thickness",Min=1, Max=5,    Default=ESP.Drawing.Skeleton.Thickness,   Decimals=0, Flag="esp_st",  Callback=function(v) ESP.Drawing.Skeleton.Thickness=v end })
+ESPRight:AddSlider({ Name="Tracer Thickness",  Min=1, Max=5,    Default=ESP.Drawing.Tracers.Thickness,    Decimals=0, Flag="esp_tt",  Callback=function(v) ESP.Drawing.Tracers.Thickness=v end })
+ESPRight:AddSlider({ Name="Rotation Speed",    Min=0, Max=1000, Default=ESP.Drawing.Boxes.RotationSpeed,  Decimals=0, Flag="esp_rs",  Callback=function(v) ESP.Drawing.Boxes.RotationSpeed=v end })
+ESPRight:AddSlider({ Name="Fill Transparency", Min=0, Max=100,  Default=ESP.Drawing.Boxes.Filled.Transparency*100, Decimals=0, Flag="esp_ft",
+    Callback=function(v) ESP.Drawing.Boxes.Filled.Transparency=v/100 end })
+
 ESPRight:AddColorPicker({ Name="Friend Color",        Default=ESP.Options.FriendcheckRGB,          Flag="esp_fc",  Callback=function(c) ESP.Options.FriendcheckRGB=c end })
 ESPRight:AddColorPicker({ Name="Enemy Color",         Default=ESP.Options.HighlightRGB,            Flag="esp_ec",  Callback=function(c) ESP.Options.HighlightRGB=c end })
 _uiRefs.NameColor        = ESPRight:AddColorPicker({ Name="Name Text Color",     Default=ESP.Drawing.Names.RGB,               Flag="esp_nc",  Callback=function(c) ESP.Drawing.Names.RGB=c end })
@@ -2806,7 +3321,23 @@ KitESPRight:AddButton({ Name="Debug Scan", Icon=Hyperion.Lucide.Search,
             if kitIsKit(obj) then count = count + 1 end
         end
         Notify("Kit ESP","Found @ "..folder:GetFullName().." | kits: "..count, count>0 and "Success" or "Error", 6)
-    end })
+    end });(function()
+    -- Trap ESP UI — runs in its own function scope, uses zero registers in the Visuals do block
+    local TL = VisualsTab:AddSection({ Name="Trap ESP",        Side="Left",  Group="Trap ESP" })
+    local TR = VisualsTab:AddSection({ Name="Trap ESP Colors", Side="Right", Group="Trap ESP" })
+    local T  = _G.TrapESP
+    TL:AddToggle({ Name="Enable Trap ESP", Default=false, Flag="trap_on",
+        Callback=function(v) T.Enabled=v; if not v then T.removeAll() end; Notify("Trap ESP",v and "ON" or "OFF","Info") end })
+    TL:AddToggle({ Name="Enemy Only",  Default=true,  Flag="trap_eo",  Callback=function(v) T.EnemyOnly=v; T.removeAll() end })
+    TL:AddToggle({ Name="Highlight",   Default=true,  Flag="trap_hl",  Callback=function(v) T.HighlightEnabled=v end })
+    TL:AddToggle({ Name="Label",       Default=true,  Flag="trap_lbl", Callback=function(v) T.LabelEnabled=v end })
+    TL:AddToggle({ Name="Distance",    Default=true,  Flag="trap_dst", Callback=function(v) T.DistEnabled=v end })
+    TL:AddToggle({ Name="Team Label",  Default=true,  Flag="trap_tl",  Callback=function(v) T.TeamLabel=v end })
+    TL:AddSlider({ Name="Max Distance",      Min=100, Max=5000, Default=5000, Decimals=0, Suffix=" studs", Flag="trap_md", Callback=function(v) T.MaxDistance=v end })
+    TL:AddSlider({ Name="Fill Transparency", Min=0,   Max=90,   Default=30,   Decimals=0, Suffix="%",      Flag="trap_tr", Callback=function(v) T.FillTransparency=v/100 end })
+    TR:AddColorPicker({ Name="Fill Color",    Default=Color3.fromRGB(255,60,60),   Flag="trap_fc", Callback=function(c) T.FillColor=c end })
+    TR:AddColorPicker({ Name="Outline Color", Default=Color3.fromRGB(255,255,255), Flag="trap_oc", Callback=function(c) T.OutlineColor=c end })
+end)()
 
 end
 
@@ -2814,11 +3345,10 @@ do
 
 local MiscTab = Window:AddTab({ Name="Misc", Icon=Hyperion.Lucide.Sliders })
 
-local MiscMoveL    = MiscTab:AddSection({ Name="Movement",       Side="Left",  Group="Player" })
-local MiscCrossR   = MiscTab:AddSection({ Name="Crosshair",      Side="Right", Group="Player" })
-local MiscTracersL = MiscTab:AddSection({ Name="Bullet Tracers", Side="Left",  Group="Tracers" })
-local MiscMineL    = MiscTab:AddSection({ Name="Auto Mine",      Side="Right", Group="Auto Mine" })
-local MiscMineR    = MiscTab:AddSection({ Name="Info",           Side="Right", Group="Auto Mine" })
+local MiscMoveL    = MiscTab:AddSection({ Name="Movement",       Side="Left",  Group="Movement" })
+local MiscTracersL = MiscTab:AddSection({ Name="Bullet Tracers", Side="Left",  Group="Utilities" })
+local MiscMineL    = MiscTab:AddSection({ Name="Auto Mine",      Side="Right", Group="Utilities" })
+local MiscMineR    = MiscTab:AddSection({ Name="Mine Info",      Side="Right", Group="Utilities" })
 
 local _amToggle = MiscMineL:AddToggle({ Name="Enable Auto Mine", Default=false, Flag="am_on",
     Callback=function(v)
@@ -2847,50 +3377,30 @@ MiscMoveL:AddToggle({ Name="Fly",    Default=false, Flag="fly_on",
     Callback=function(v) Move.Fly=v; if not _configLoading then if v then EnableFly() else DisableFly() end; Notify("Fly",v and "ON" or "OFF","Info") end end })
 MiscMoveL:AddToggle({ Name="Noclip", Default=false, Flag="nc_on",
     Callback=function(v) Move.Noclip=v; if not _configLoading then Notify("Noclip",v and "ON" or "OFF","Info") end end })
+local _isToggle = MiscMoveL:AddToggle({ Name="Instant Sprint", Default=false, Flag="is_on",
+    Callback=function(v) InstantSprint.Enabled=v; if not _configLoading then Notify("Movement","Instant Sprint "..(v and "ON" or "OFF"),"Info") end end })
+MiscMoveL:AddToggle({ Name="Spinbot", Default=false, Flag="spin_on",
+    Callback=function(v) Rage.Spinbot=v; if not _configLoading then if v then SpinbotStart() else SpinbotStop() end; Notify("Movement","Spinbot "..(v and "ON" or "OFF"),"Info") end end })
+MiscMoveL:AddToggle({ Name="TP Walk", Default=false, Flag="tpw_on",
+    Callback=function(v) Rage.TPWalk=v; if not _configLoading then Notify("Movement","TP Walk "..(v and "ON" or "OFF"),"Info") end end })
 
-MiscMoveL:AddSlider({ Name="Fly Speed",  Min=10, Max=300, Default=50, Decimals=0, Flag="fly_spd", Callback=function(v) Move.FlySpeed=v end })
-MiscMoveL:AddSlider({ Name="Walk Speed", Min=16, Max=250, Default=16, Decimals=0, Flag="ws",      Callback=function(v) if Hum then Hum.WalkSpeed=v end end })
+MiscMoveL:AddSlider({ Name="Fly Speed",    Min=10, Max=300, Default=50,  Decimals=0, Flag="fly_spd",  Callback=function(v) Move.FlySpeed=v end })
+MiscMoveL:AddSlider({ Name="Walk Speed",   Min=16, Max=250, Default=16,  Decimals=0, Flag="ws",       Callback=function(v) Move.WalkBase=v; if Hum then Hum.WalkSpeed=v end end })
+MiscMoveL:AddSlider({ Name="Spin Speed",   Min=1,  Max=100, Default=20,  Decimals=0, Flag="spin_spd", Callback=function(v) Rage.SpinSpeed=v; if _spinBAV then _spinBAV.AngularVelocity=Vector3.new(0,v,0) end end })
+MiscMoveL:AddSlider({ Name="TP Walk Speed",Min=5,  Max=100, Default=17,  Decimals=0, Flag="tpw_spd",  Callback=function(v) Rage.TPWalkSpeed=v/10 end })
 
 MiscMoveL:AddKeybind({ Name="Fly Keybind",    Default=Enum.KeyCode.H, Flag="fly_kb",
     Callback=function() if Move.Fly then DisableFly(); Notify("Fly","OFF","Info") else EnableFly(); Notify("Fly","ON","Info") end end })
 MiscMoveL:AddKeybind({ Name="Noclip Keybind", Default=Enum.KeyCode.V, Flag="nc_kb",
     Callback=function() Move.Noclip=not Move.Noclip; Notify("Noclip",Move.Noclip and "ON" or "OFF","Info") end })
+MiscMoveL:AddKeybind({ Name="Sprint Keybind", Default=Enum.KeyCode.P, Flag="is_kb",
+    Callback=function()
+        local v = not InstantSprint.Enabled
+        local ok = pcall(function() _isToggle:Set(v) end)
+        if not ok then InstantSprint.Enabled = v end
+        Notify("Movement","Instant Sprint "..(v and "ON" or "OFF"),"Info")
+    end })
 
-MiscMoveL:AddToggle({ Name="Spinbot", Default=false, Flag="spin_on",
-    Callback=function(v) Rage.Spinbot=v; if not _configLoading then if v then SpinbotStart() else SpinbotStop() end; Notify("Movement","Spinbot "..(v and "ON" or "OFF"),"Info") end end })
-MiscMoveL:AddSlider({ Name="Spin Speed", Min=1, Max=100, Default=20, Decimals=0, Flag="spin_spd",
-    Callback=function(v) Rage.SpinSpeed=v; if _spinBAV then _spinBAV.AngularVelocity=Vector3.new(0,v,0) end end })
-
-MiscMoveL:AddToggle({ Name="TP Walk", Default=false, Flag="tpw_on",
-    Callback=function(v) Rage.TPWalk=v; if not _configLoading then Notify("Movement","TP Walk "..(v and "ON" or "OFF"),"Info") end end })
-MiscMoveL:AddSlider({ Name="TP Walk Speed", Min=5, Max=100, Default=17, Decimals=0, Flag="tpw_spd",
-    Callback=function(v) Rage.TPWalkSpeed=v/10 end })
-
-MiscCrossR:AddToggle({ Name="Enabled",        Default=false, Flag="cross_on",  Callback=function(v) Cross.Enabled=v end })
-MiscCrossR:AddToggle({ Name="Dynamic Spread", Default=false, Flag="cross_dyn", Callback=function(v) Cross.Dynamic=v end })
-MiscCrossR:AddToggle({ Name="Rotate",         Default=false, Flag="cross_rot", Callback=function(v) Cross.Rotate=v end })
-MiscCrossR:AddToggle({ Name="Rainbow",        Default=false, Flag="cross_rb",  Callback=function(v) Cross.RainbowColor=v end })
-
-MiscCrossR:AddDropdown({ Name="Style",    Values={"Classic","T-Style","Circle","Dot"}, Default="Classic", Flag="cross_sty",
-    Callback=function(v) Cross.Style=v; Cross.TStyle=(v=="T-Style") end })
-MiscCrossR:AddDropdown({ Name="Position", Values={"Mouse","Center"},                   Default="Mouse",   Flag="cross_pos",
-    Callback=function(v) Cross.Position=v=="Mouse" and 1 or 2 end })
-MiscCrossR:AddSlider({ Name="Size",           Min=2,  Max=40, Default=12, Decimals=0, Flag="cross_sz",  Callback=function(v) Cross.Size=v end })
-MiscCrossR:AddSlider({ Name="Gap",            Min=0,  Max=24, Default=6,  Decimals=0, Flag="cross_gap", Callback=function(v) Cross.GapSize=v end })
-MiscCrossR:AddSlider({ Name="Thickness",      Min=1,  Max=6,  Default=1,  Decimals=0, Flag="cross_thk", Callback=function(v) Cross.Thickness=v end })
-MiscCrossR:AddSlider({ Name="Rotation Speed", Min=1,  Max=20, Default=5,  Decimals=0, Flag="cross_rs",  Callback=function(v) Cross.RotationSpeed=v end })
-
-MiscCrossR:AddToggle({ Name="Center Dot",  Default=true, Flag="cross_cd", Callback=function(v) Cross.CenterDotEnabled=v end })
-MiscCrossR:AddToggle({ Name="Dot Filled",  Default=true, Flag="cross_df", Callback=function(v) Cross.CenterDotFilled=v end })
-MiscCrossR:AddToggle({ Name="Inner Lines", Default=false,Flag="cross_il", Callback=function(v) Cross.InnerEnabled=v end })
-MiscCrossR:AddSlider({ Name="Dot Radius",  Min=1, Max=10, Default=2, Decimals=0, Flag="cross_dr", Callback=function(v) Cross.CenterDotRadius=v end })
-MiscCrossR:AddSlider({ Name="Inner Size",  Min=1, Max=16, Default=4, Decimals=0, Flag="cross_is", Callback=function(v) Cross.InnerSize=v end })
-MiscCrossR:AddSlider({ Name="Inner Gap",   Min=0, Max=10, Default=2, Decimals=0, Flag="cross_ig", Callback=function(v) Cross.InnerGap=v end })
-
-MiscCrossR:AddToggle({ Name="Outline",       Default=true, Flag="cross_ol", Callback=function(v) Cross.Outline=v end })
-MiscCrossR:AddColorPicker({ Name="Color",         Default=Color3.fromRGB(255,255,255), Flag="cross_col", Callback=function(c) Cross.Color=c end })
-MiscCrossR:AddColorPicker({ Name="Outline Color", Default=Color3.fromRGB(255,255,255), Flag="cross_oc",  Callback=function(c) Cross.OutlineColor=c end })
-MiscCrossR:AddColorPicker({ Name="Dot Color",     Default=Color3.fromRGB(255,255,255), Flag="cross_dc",  Callback=function(c) Cross.CenterDotColor=c end })
 
 MiscTracersL:AddToggle({ Name="Enable Tracers", Default=false, Flag="bt_on",
     Callback=function(v)
@@ -2967,7 +3477,6 @@ SystemSec:AddButton({ Name="Unload Script", Icon=Hyperion.Lucide.Power,
         pcall(FOVCircle.Remove,FOVCircle); pcall(AimDot.Remove,AimDot); pcall(AimDotOut.Remove,AimDotOut)
         HideFOVFill(); pcall(function() if _fovFillGui then _fovFillGui:Destroy() end end)
         pcall(FOVWatermarkText.Remove, FOVWatermarkText)
-        for _,d in pairs(CL) do pcall(d.Remove,d) end
         pcall(RageFOV.Remove,RageFOV); pcall(RageTargetInfo.Remove,RageTargetInfo)
         Rage.Enabled=false; Rage.TPWalk=false; Rage.Spinbot=false; Rage.HitboxExpander=false
         KillAura.Enabled=false
